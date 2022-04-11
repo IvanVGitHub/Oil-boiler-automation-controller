@@ -1,0 +1,19 @@
+int const SHIM = 12; // ШИМ для управления мотором
+
+int moshnostSHIM = 255; // Диапазон 0-255 значений, соответствующий мощности маслонасоса
+
+void setup()
+{
+	Serial.begin(9600); // Подготовка Serial Monitor для вывода информации
+	pinMode(SHIM, OUTPUT);
+}
+
+void loop()
+{
+	analogWrite(SHIM, moshnostSHIM);
+	Serial.print("Moshhnost maslonasosa: ");
+	Serial.print(map(moshnostSHIM, 0, 255, 0, 100));
+	Serial.println("%");
+	Serial.println();
+	delay(1000);
+}

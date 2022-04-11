@@ -1,0 +1,409 @@
+﻿// Библиотеки
+#include <EEPROM.h> // библоитека для хранения и записи переменных в энерго независимой памяти
+#include <TM74HC595Display.h>  // Библиотека конкретного 7-сегментного дисплея
+
+// Блок кнопок и выводов
+const byte saveMode = 8;  // Фиксируем новое значение ШИМ для текущей температуры в Стартовых установках
+const byte FREE = 5;  // !!!Не задействованный вывод!!!
+const byte minus = 3;  // Минус 5 градусов
+const byte info = 4;  // Мгновенная температура котла
+const byte plus = 2;  // Плюс 5 градусов
+const byte OnOff_HandALARMA = 7;  // Выключатель контроля прекращения горения
+const byte ALARMA = 6;  // Динамик тревоги
+const byte SCLK = 9;  // Для 7-сегментного дисплея
+const byte RCLK = 10;  // Для 7-сегментного дисплея
+const byte DIO = 11;  // Для 7-сегментного дисплея
+const byte SHIM = 12;  // ШИМ для управления мотором
+
+// Атрибуты дисплея
+TM74HC595Display disp(SCLK, RCLK, DIO);  // Иниициализация нашего 7-сегментного дисплея
+
+// Атрибуты термодатчика
+int analogPin = 0;  // Аналоговый вход для считывания напряжения с делителя напряжения
+float Vout = 0;  // Переменная для хранения значения напряжения в средней точки делителя (0-5,0)
+word R1 = 9640;  // Подтягивающий резистор R1 на 10кОм
+int RTermopari;  // Сопротивление термодатчика на котле
+int tCFakticheskaya;  // Фактическая температура по Цельсию на датчике
+
+// Атрибуты котла
+unsigned long checkTimerTemp = 300000;  // Промежуток времени (мс), через который происходит контроль температуры
+unsigned long cacheMillis = millis();  // Хранение значение таймера
+int tCJelaemaya = 75;  // Желаемая температура по Цельсию на датчике
+int moshnostSHIM = 39;  // Диапазон 0-255 значений, соответствующий мощности маслонасоса
+int lastMoshnostSHIM = moshnostSHIM;  // Хранит предшествующее текущему значение moshnostSHIM
+int minOboroti = 77;  // Размер ШИМ сигнала, граница рабочего диапазона
+int maxOboroti = 153;  // Размер ШИМ сигнала, граница рабочего диапазона
+byte cacheGisterezis = 0;  // В переменной число (чётное/нечётное) для Калибровки при нагревании через раз
+int cacheArrayModeTemp = 0;  // Хранится номер ячейки массива arrayMode, соответствующей температуре термодатчика
+byte procentiOborotov = 20;  // В ручном режиме задаёт вращение мощность маслонасоса в процентах
+
+void setup()
+{	
+	pinMode(saveMode, INPUT);
+	digitalWrite(saveMode, HIGH);
+	
+	pinMode(FREE, INPUT);
+	digitalWrite(FREE, HIGH);
+	
+	pinMode(minus, INPUT);
+	digitalWrite(minus, HIGH);
+	
+	pinMode(info, INPUT);
+	digitalWrite(info, HIGH);
+	
+	pinMode(plus, INPUT);
+	digitalWrite(plus, HIGH);
+	
+	pinMode(OnOff_HandALARMA, INPUT);
+	digitalWrite(OnOff_HandALARMA, HIGH);
+	
+	pinMode(ALARMA, OUTPUT);
+	
+	pinMode(SHIM, OUTPUT);
+	
+	temperatura();
+	kalibrovka();
+	
+	EEPROM.update(0, 51);
+	EEPROM.update(1, 61);
+	EEPROM.update(2, 71);
+	EEPROM.update(3, 81);
+	EEPROM.update(4, 91);
+	EEPROM.update(5, 101);
+	EEPROM.update(6, 111);
+	EEPROM.update(7, 121);
+	EEPROM.update(8, 131);
+	EEPROM.update(9, 141);
+	EEPROM.update(10, 151);
+}
+
+void loop()
+{
+	if (digitalRead(OnOff_HandALARMA) == LOW)
+	{
+		temperatura();
+		if (tCFakticheskaya < 30)
+		{
+			moshnostSHIM = 0;
+			analogWrite(SHIM, moshnostSHIM);
+			digitalWrite(ALARMA, HIGH);
+			showNumber_7Segm(8888);
+		}
+		else
+		{
+			digitalWrite(ALARMA, LOW);
+			moshnostSHIM = lastMoshnostSHIM;
+			analogWrite(SHIM, moshnostSHIM);
+			showNumber_7Segm(tCJelaemaya);
+			controlKotel();
+		}
+	}
+	else
+	{
+		digitalWrite(ALARMA, LOW);
+		analogWrite(SHIM, moshnostSHIM);
+		showNumber_7Segm(procentiOborotov);  // Переводим сигнал ШИМ в проценты
+		handControlKotel();
+	}
+}
+
+void handControlKotel()
+{
+	if (digitalRead(minus) == LOW)
+	{
+		moshnostSHIM = lastMoshnostSHIM;
+		procentiOborotov = procentiOborotov - 2;  // Изменяем обороты маслонасоса на 2%
+		procentiOborotov = constrain(procentiOborotov, 20, 100);  // Контролируем, чтобы значение оставалось в рабочем диапазоне
+		moshnostSHIM = procentiOborotov * 2.55;  // Конвертируем проценты в размерность ШИМ
+		lastMoshnostSHIM = moshnostSHIM;  // Сохраняем последнее изменение оборотов маслонасоса в кэш
+		delay(100);  // Костыль, чтобы кнопка не нажималась как бешеная
+	}
+	
+	if (digitalRead(info) == LOW)
+	{
+		temperatura();
+		for (int i=0; i <= 1000; i++)
+		{
+			showNumber_7Segm(tCFakticheskaya);
+		}
+	}
+	
+	if (digitalRead(plus) == LOW)
+	{
+		moshnostSHIM = lastMoshnostSHIM;
+		procentiOborotov = procentiOborotov + 2;  // Изменяем обороты маслонасоса на 2%
+		procentiOborotov = constrain(procentiOborotov, 20, 100);  // Контролируем, чтобы значение оставалось в рабочем диапазоне
+		moshnostSHIM = procentiOborotov * 2.55;  // Конвертируем проценты в размерность ШИМ
+		lastMoshnostSHIM = moshnostSHIM;  // Сохраняем последнее изменение оборотов маслонасоса в кэш
+		delay(100);  // Костыль, чтобы кнопка не нажималась как бешеная
+	}
+	
+	if (digitalRead(saveMode) == LOW)
+	{
+		converter();
+		EEPROM.update(cacheArrayModeTemp, moshnostSHIM);  // В ячейку cacheArrayModeTemp записываем moshnostSHIM
+	}
+	
+	temperatura();
+	if (tCFakticheskaya > 80)
+	{
+		moshnostSHIM = 0;
+		analogWrite(SHIM, moshnostSHIM);
+	}
+	else
+	{
+		moshnostSHIM = lastMoshnostSHIM;  // Сохраняем последнее изменение оборотов маслонасоса в кэш
+		analogWrite(SHIM, moshnostSHIM);
+	}
+}
+
+void controlKotel()
+{
+	if (digitalRead(minus) == LOW)
+	{
+		temperatura();
+		if (tCJelaemaya >= 35 && tCJelaemaya <= 80)
+		{
+			tCJelaemaya = tCJelaemaya - 5;  // Понижаем на 5 градусов желаемую температуру котла
+			temperatura();
+			kalibrovka();
+			showNumber_7Segm(tCJelaemaya);
+			cacheMillis = millis();  // Обнуляем таймер сверки
+			delay(100);  // Костыль, чтобы кнопка не нажималась как бешеная
+		}
+		converter();
+		moshnostSHIM = EEPROM.read(cacheArrayModeTemp);  // Задаём значение мощности маслонасоса для выбранной температуры
+	}
+
+	if (digitalRead(info) == LOW)
+	{
+		temperatura();
+		for (int i=0; i <= 1000; i++)
+		{
+			showNumber_7Segm(tCFakticheskaya);
+		}
+		showNumber_7Segm(tCJelaemaya);
+	}
+
+	if (digitalRead(plus) == LOW)
+	{
+		temperatura();
+		if (tCJelaemaya >= 30 && tCJelaemaya <= 75)
+		{
+			tCJelaemaya = tCJelaemaya + 5;  // Повышаем на 5 градусов желаемую температуру котла
+			temperatura();
+			kalibrovka();
+			showNumber_7Segm(tCJelaemaya);
+			cacheMillis = millis();  // Обнуляем таймер сверки
+			delay(100);  // Костыль, чтобы кнопка не нажималась как бешеная
+		}
+		converter();
+		moshnostSHIM = EEPROM.read(cacheArrayModeTemp);  // Задаём значение мощности маслонасоса для выбранной температуры
+	}
+	
+	if (digitalRead(saveMode) == LOW)
+	{
+		converter();
+		EEPROM.update(cacheArrayModeTemp, moshnostSHIM);  // В ячейку cacheArrayModeTemp записываем moshnostSHIM
+	}
+	
+	if (tCFakticheskaya > 80)
+	{
+		moshnostSHIM = 0;
+		analogWrite(SHIM, moshnostSHIM);
+	}
+	else
+	{
+		moshnostSHIM = lastMoshnostSHIM;  // Сохраняем последнее изменение оборотов маслонасоса в кэш
+		analogWrite(SHIM, moshnostSHIM);
+	}
+	
+	if (millis() - cacheMillis > checkTimerTemp)
+	{
+		kalibrovka();
+		cacheMillis = millis();  // Обнуляем таймер сверки
+	}
+}
+
+void kalibrovka()
+{
+	temperatura();
+	
+	if (tCFakticheskaya > tCJelaemaya)  // Перегрев
+	{
+		moshnostSHIM = lastMoshnostSHIM;  // Если было аварийное отключение маслонасоса, то снова запускаем на "последних значениях оборотов минус 5%"
+		moshnostSHIM = moshnostSHIM - 13;  // Эквивалентно изменению оборотов на 5%
+		moshnostSHIM = constrain(moshnostSHIM, minOboroti, maxOboroti);  // Контролируем, чтобы значение оставалось в рабочем диапазоне
+		analogWrite(SHIM, moshnostSHIM);
+		lastMoshnostSHIM = moshnostSHIM;  // Сохраняем последнее изменение оборотов маслонасоса в кэш
+	}
+	else  // Нагревание
+	{
+		if (cacheGisterezis == 1)  // Заходит в цикл только когда cacheGisterezis = 1, чтобы через раз сверять показатели при нагревании
+		{
+			if (tCJelaemaya > tCFakticheskaya)
+			{
+				moshnostSHIM = lastMoshnostSHIM;  // Если было аварийное отключение маслонасоса, то снова запускаем на "последних значениях оборотов минус 5%", иначе значения равны
+				moshnostSHIM = moshnostSHIM + 13;  // Эквивалентно изменению оборотов на 5%
+				moshnostSHIM = constrain(moshnostSHIM, minOboroti, maxOboroti);  // Контролируем, чтобы значение оставалось в рабочем диапазоне
+				analogWrite(SHIM, moshnostSHIM);
+				lastMoshnostSHIM = moshnostSHIM;  // Сохраняем последнее изменение оборотов маслонасоса в кэш
+				cacheGisterezis = 0;
+			}
+		}
+		else
+		{
+			cacheGisterezis = 1;
+		}
+	}
+}
+
+void converter()
+{
+	temperatura();
+	switch (tCFakticheskaya)
+	{
+		case 30:
+			cacheArrayModeTemp = 0;
+			break;
+		case 35:
+			cacheArrayModeTemp = 1;
+			break;
+		case 40:
+			cacheArrayModeTemp = 2;
+			break;
+		case 45:
+			cacheArrayModeTemp = 3;
+			break;
+		case 50:
+			cacheArrayModeTemp = 4;
+			break;
+		case 55:
+			cacheArrayModeTemp = 5;
+			break;
+		case 60:
+			cacheArrayModeTemp = 6;
+			break;
+		case 65:
+			cacheArrayModeTemp = 7;
+			break;
+		case 70:
+			cacheArrayModeTemp = 8;
+			break;
+		case 75:
+			cacheArrayModeTemp = 9;
+			break;
+		case 80:
+			cacheArrayModeTemp = 10;
+			break;
+	}
+}
+
+void temperatura()
+{
+	Vout = (5.0 / 1023.0) * analogRead(analogPin);  // Вычисляем напряжение в средней точки делителя (0-5.0)
+	RTermopari = R1 / ((5 / Vout) - 1);  // Вычисляем сопротивление термодатчика
+
+	if (RTermopari >= 889)
+	{
+		if (RTermopari >= 2438)
+		{
+			if (RTermopari >= 5700)
+			{
+				tCFakticheskaya = 1;
+			}
+			if (RTermopari >= 4800 && RTermopari < 5700)
+			{
+				tCFakticheskaya = 10;
+			}
+			if (RTermopari >= 3805 && RTermopari < 4800)
+			{
+				tCFakticheskaya = 15;
+			}
+			if (RTermopari >= 3036 && RTermopari < 3805)
+			{
+				tCFakticheskaya = 20;
+			}
+			if (RTermopari >= 2438 && RTermopari < 3036)
+			{
+				tCFakticheskaya = 25;
+			}
+		}
+		if (RTermopari < 2438)
+		{
+			if (RTermopari >= 1970 && RTermopari < 2438)
+			{
+				tCFakticheskaya = 30;
+			}
+			if (RTermopari >= 1601 && RTermopari < 1970)
+			{
+				tCFakticheskaya = 35;
+			}
+			if (RTermopari >= 1309 && RTermopari < 1601)
+			{
+				tCFakticheskaya = 40;
+			}
+			if (RTermopari >= 1076 && RTermopari < 1309)
+			{
+				tCFakticheskaya = 45;
+			}
+			if (RTermopari >= 889 && RTermopari < 1076)
+			{
+				tCFakticheskaya = 50;
+			}
+		}
+	}
+
+	if (RTermopari < 889)
+	{
+		if (RTermopari >= 369)
+		{
+			if (RTermopari >= 738 && RTermopari < 889)
+			{
+				tCFakticheskaya = 55;
+			}
+			if (RTermopari >= 616 && RTermopari < 738)
+			{
+				tCFakticheskaya = 60;
+			}
+			if (RTermopari >= 517 && RTermopari < 616)
+			{
+				tCFakticheskaya = 65;
+			}
+			if (RTermopari >= 436 && RTermopari < 517)
+			{
+				tCFakticheskaya = 70;
+			}
+			if (RTermopari >= 369 && RTermopari < 436)
+			{
+				tCFakticheskaya = 75;
+			}
+		}
+		if (RTermopari < 369)
+		{
+			if (RTermopari >= 313 && RTermopari < 369)
+			{
+				tCFakticheskaya = 80;
+			}
+			if (RTermopari >= 267 && RTermopari < 313)
+			{
+				tCFakticheskaya = 85;
+			}
+			if (RTermopari >= 210 && RTermopari < 267)
+			{
+				tCFakticheskaya = 90;
+			}
+			if (RTermopari < 210)
+			{
+				tCFakticheskaya = 99;
+			}
+		}
+	}
+}
+
+void showNumber_7Segm(int value)
+{
+	disp.timerIsr();  // Пробуждаем дисплей
+	disp.clear();
+	disp.digit4(value);
+}
